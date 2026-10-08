@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.DS_Store
+# Raw results are committed deliberately once a real GPU run exists; scratch runs go elsewhere.
+results/scratch*/
