@@ -1,0 +1,159 @@
+{{- $e := .Values.engine -}}
+{{- $isTriton := eq .Values.backend "triton" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "llm-serving.fullname" . }}
+  labels:
+    {{- include "llm-serving.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  # One GPU, one pod: a rolling update would wait forever for a second GPU.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "llm-serving.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "llm-serving.selectorLabels" . | nindent 8 }}
+      annotations:
+        {{- if $isTriton }}
+        checksum/model-repo: {{ include (print $.Template.BasePath "/configmap-triton.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      automountServiceAccountToken: false
+      {{- if $isTriton }}
+      initContainers:
+        # ConfigMap volumes are symlink farms (..data/...) that Triton would scan as models;
+        # copy a clean, dereferenced model repository into an emptyDir instead.
+        - name: stage-model-repo
+          image: {{ include "llm-serving.image" .Values.triton.image }}
+          imagePullPolicy: {{ .Values.triton.image.pullPolicy }}
+          command: ["sh", "-c", "cp -rL /model-repo-src/tensorrt_llm /models/ && find /models -type f"]
+          securityContext:
+            allowPrivilegeEscalation: false
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          volumeMounts:
+            - {name: model-repo-src, mountPath: /model-repo-src, readOnly: true}
+            - {name: model-repo, mountPath: /models}
+      {{- end }}
+      containers:
+        - name: {{ .Values.backend }}
+          {{- if $isTriton }}
+          image: {{ include "llm-serving.image" .Values.triton.image }}
+          imagePullPolicy: {{ .Values.triton.image.pullPolicy }}
+          # Equivalent to NVIDIA's launch_triton_server.py for world_size=1, run in the foreground.
+          command: ["mpirun"]
+          args:
+            - --allow-run-as-root
+            - -n
+            - "1"
+            - tritonserver
+            - --model-repository=/models
+            - --http-port={{ .Values.service.httpPort }}
+            - --grpc-port=8001
+            - --metrics-port=8002
+            {{- range .Values.triton.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          {{- else }}
+          image: {{ include "llm-serving.image" .Values.vllm.image }}
+          imagePullPolicy: {{ .Values.vllm.image.pullPolicy }}
+          command: ["vllm", "serve"]
+          args:
+            - {{ .Values.model.id | quote }}
+            - --revision={{ .Values.model.revision }}
+            - --served-model-name={{ .Values.model.servedName }}
+            - --host=0.0.0.0
+            - --port={{ .Values.service.httpPort }}
+            - --dtype={{ $e.dtype }}
+            - --max-model-len={{ $e.maxModelLen }}
+            - --max-num-seqs={{ $e.maxNumSeqs }}
+            - --max-num-batched-tokens={{ $e.maxNumBatchedTokens }}
+            - --kv-cache-memory-bytes={{ int64 $e.kvCacheBytes }}
+            - --seed={{ $e.seed }}
+            - {{ ternary "--enable-prefix-caching" "--no-enable-prefix-caching" $e.prefixCaching }}
+            {{- if not $e.cudaGraphs }}
+            - --enforce-eager
+            {{- end }}
+            # Ignore the model's generation_config.json sampling defaults (Qwen ships
+            # repetition_penalty=1.1, temperature=0.7, top_k=20, top_p=0.8). TRT-LLM does not apply them, so this keeps
+            # sampling identical: only what the client sends is used.
+            - --generation-config=vllm
+            {{- range .Values.vllm.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          {{- end }}
+          env:
+            {{- include "llm-serving.cacheEnv" . | nindent 12 }}
+            {{- if .Values.modelCache.offline }}
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            {{- end }}
+          ports:
+            - {name: http, containerPort: {{ .Values.service.httpPort }}, protocol: TCP}
+            {{- if $isTriton }}
+            - {name: grpc, containerPort: 8001, protocol: TCP}
+            - {name: metrics, containerPort: 8002, protocol: TCP}
+            {{- end }}
+          {{- $ready := ternary "/v2/models/tensorrt_llm/ready" "/health" $isTriton }}
+          {{- $live := ternary "/v2/health/live" "/health" $isTriton }}
+          startupProbe:
+            httpGet: {path: {{ $ready }}, port: http}
+            {{- toYaml .Values.probes.startup | nindent 12 }}
+          readinessProbe:
+            httpGet: {path: {{ $ready }}, port: http}
+            {{- toYaml .Values.probes.readiness | nindent 12 }}
+          livenessProbe:
+            httpGet: {path: {{ $live }}, port: http}
+            {{- toYaml .Values.probes.liveness | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - {name: model-cache, mountPath: {{ .Values.modelCache.mountPath }}}
+            - {name: dshm, mountPath: /dev/shm}
+            {{- if $isTriton }}
+            - {name: model-repo, mountPath: /models}
+            {{- end }}
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: {{ include "llm-serving.cacheClaim" . }}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.shmSize }}
+        {{- if $isTriton }}
+        - name: model-repo
+          emptyDir: {}
+        - name: model-repo-src
+          configMap:
+            name: {{ include "llm-serving.fullname" . }}-model-repo
+            items:
+              - {key: config.pbtxt, path: tensorrt_llm/config.pbtxt}
+              - {key: model.py, path: tensorrt_llm/1/model.py}
+              - {key: helpers.py, path: tensorrt_llm/1/helpers.py}
+              - {key: model.yaml, path: tensorrt_llm/1/model.yaml}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

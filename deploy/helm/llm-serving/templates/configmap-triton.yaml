@@ -1,0 +1,47 @@
+{{- if eq .Values.backend "triton" }}
+{{- $e := .Values.engine }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "llm-serving.fullname" . }}-model-repo
+  labels:
+    {{- include "llm-serving.labels" . | nindent 4 }}
+data:
+  config.pbtxt: |-
+{{ .Files.Get "files/triton/config.pbtxt" | indent 4 }}
+  model.py: |-
+{{ .Files.Get "files/triton/model.py" | indent 4 }}
+  helpers.py: |-
+{{ .Files.Get "files/triton/helpers.py" | indent 4 }}
+  # Rendered from values.yaml `engine:`. Every top-level key except triton_config is passed
+  # to tensorrt_llm.LLM(...) (PyTorch backend, no engine build).
+  model.yaml: |-
+    model: {{ .Values.model.id }}
+    revision: {{ .Values.model.revision }}
+    backend: pytorch
+    dtype: {{ $e.dtype }}
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    max_batch_size: {{ $e.maxNumSeqs }}
+    max_num_tokens: {{ $e.maxNumBatchedTokens }}
+    max_seq_len: {{ $e.maxModelLen }}
+    enable_chunked_prefill: {{ $e.chunkedPrefill }}
+    kv_cache_config:
+      enable_block_reuse: {{ $e.prefixCaching }}
+      # The smaller of the two wins, so this pins KV cache to kvCacheBytes (same as vLLM).
+      max_gpu_total_bytes: {{ int64 $e.kvCacheBytes }}
+      free_gpu_memory_fraction: 0.9
+    {{- if $e.cudaGraphs }}
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: {{ $e.maxNumSeqs }}
+    {{- else }}
+    cuda_graph_config: null
+    {{- end }}
+    triton_config:
+      # Triton-level batching stays off; in-flight batching happens inside the LLM engine.
+      max_batch_size: 0
+      # Decoupled mode is required for token streaming (generate_stream / TTFT).
+      decoupled: true
+      cancellation_check_period_ms: {{ .Values.triton.cancellationCheckPeriodMs }}
+{{- end }}

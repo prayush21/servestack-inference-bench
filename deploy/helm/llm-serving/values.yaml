@@ -1,0 +1,120 @@
+# Which serving stack this release deploys: "vllm" or "triton".
+# Install one release at a time on a single-GPU node (see README "Benchmark").
+backend: vllm
+
+model:
+  # Hugging Face repo id and the exact commit benchmarked. Ungated, Apache-2.0.
+  id: Qwen/Qwen2.5-1.5B-Instruct
+  revision: 989aa7980e4cf806f80c7fef2b1adb7bc71aa306
+  # Name clients use in the OpenAI `model` field (vLLM). Triton's model name is fixed: tensorrt_llm.
+  servedName: qwen2.5-1.5b-instruct
+
+# Settings shared by both backends. Each template maps these onto the backend's own flags,
+# so the two deployments cannot silently drift apart.
+engine:
+  dtype: auto                 # model's native dtype (bf16 for Qwen2.5)
+  maxModelLen: 4096           # vLLM --max-model-len / TRT-LLM max_seq_len
+  maxNumSeqs: 64              # vLLM --max-num-seqs / TRT-LLM max_batch_size
+  maxNumBatchedTokens: 8192   # vLLM --max-num-batched-tokens / TRT-LLM max_num_tokens
+  # Identical KV-cache byte budget on both (vLLM --kv-cache-memory-bytes,
+  # TRT-LLM kv_cache_config.max_gpu_total_bytes). 8 GiB fits on a 24 GB L4 next to ~3.1 GB of weights.
+  kvCacheBytes: 8589934592
+  prefixCaching: false        # off on both: the fixed prompt set would otherwise hit the cache
+  chunkedPrefill: true        # always on in vLLM V1; enabled in TRT-LLM to match
+  cudaGraphs: true
+  seed: 0
+
+modelCache:
+  # PVC holding the Hugging Face cache (HF_HOME). It is NOT owned by the backend releases:
+  # scripts/prepare_model_cache.sh renders it (plus the download Job) from this chart once,
+  # and both backends mount it, so they load byte-identical weights.
+  claimName: llm-model-cache
+  create: false               # only set true by scripts/prepare_model_cache.sh
+  size: 20Gi
+  storageClassName: ""        # "" = cluster default
+  accessMode: ReadWriteOnce   # fine: the backends run one at a time on one node
+  mountPath: /cache
+  # Serve with HF_HUB_OFFLINE=1 so a missing cache fails fast instead of silently re-downloading.
+  offline: true
+
+modelDownload:
+  # One-shot Job that fills the cache. Reuses the vLLM image (it already has huggingface_hub).
+  # Only set true by scripts/prepare_model_cache.sh.
+  enabled: false
+  backoffLimit: 2
+  resources:
+    requests: {cpu: "1", memory: 2Gi}
+    limits: {cpu: "2", memory: 4Gi}
+
+# Optional, only needed for gated models. Create it out-of-band:
+#   kubectl create secret generic hf-token --from-literal=token=hf_xxx
+# Never commit tokens to this repo.
+hfToken:
+  secretName: ""
+  secretKey: token
+
+vllm:
+  image:
+    repository: vllm/vllm-openai
+    tag: v0.30.0
+    digest: sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
+    pullPolicy: IfNotPresent
+  extraArgs: []
+
+triton:
+  image:
+    repository: nvcr.io/nvidia/tritonserver
+    tag: 26.07-trtllm-python-py3   # Triton 2.71.0, TensorRT-LLM 1.2.1
+    digest: sha256:b097871d05da2e63178d1b91fd1199bc395f653ade4f05ab227c463ea7437007
+    pullPolicy: IfNotPresent
+  # Interval at which the Python model polls for cancelled requests.
+  cancellationCheckPeriodMs: 100
+  extraArgs: []
+
+service:
+  type: ClusterIP             # reach it with `kubectl port-forward`; do not expose an unauthenticated LLM publicly
+  httpPort: 8000
+
+resources:
+  requests:
+    cpu: "4"
+    memory: 16Gi
+    nvidia.com/gpu: 1
+  limits:
+    # Sized for an 8 vCPU / 32 GB L4 node (e.g. GKE g2-standard-8).
+    cpu: "8"
+    memory: 24Gi
+    nvidia.com/gpu: 1
+
+# Shared memory for NCCL/MPI/Python-backend IPC; the container default (64Mi) is too small.
+shmSize: 4Gi
+
+probes:
+  # Model load + CUDA graph capture can take several minutes on first start.
+  startup: {periodSeconds: 10, failureThreshold: 90, timeoutSeconds: 5}
+  readiness: {periodSeconds: 10, failureThreshold: 3, timeoutSeconds: 5}
+  liveness: {periodSeconds: 20, failureThreshold: 3, timeoutSeconds: 5}
+
+nodeSelector: {}
+#  cloud.google.com/gke-accelerator: nvidia-l4
+tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+affinity: {}
+
+terminationGracePeriodSeconds: 60
+podAnnotations: {}
+
+# In-cluster benchmark client (rendered only by scripts/run_benchmark.sh with CLIENT=incluster).
+# Running the load generator next to the server avoids measuring `kubectl port-forward`.
+loadgen:
+  enabled: false
+  image:
+    repository: python
+    tag: 3.12.12-slim
+    digest: sha256:f3fa41d74a768c2fce8016b98c191ae8c1bacd8f1152870a3f9f87d350920b7c
+    pullPolicy: IfNotPresent
+  resources:
+    requests: {cpu: "2", memory: 2Gi}
+    limits: {cpu: "4", memory: 4Gi}

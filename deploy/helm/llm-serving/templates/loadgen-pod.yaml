@@ -1,0 +1,37 @@
+{{- if .Values.loadgen.enabled }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: llmbench-client
+  labels:
+    app.kubernetes.io/name: llmbench-client
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: client
+      image: {{ include "llm-serving.image" .Values.loadgen.image }}
+      imagePullPolicy: {{ .Values.loadgen.image.pullPolicy }}
+      # Idles; run_benchmark.sh copies the repo in and execs the load generator.
+      command: ["sleep", "infinity"]
+      resources:
+        {{- toYaml .Values.loadgen.resources | nindent 8 }}
+      securityContext:
+        allowPrivilegeEscalation: false
+  # Prefer a different node than the server (if the cluster has one) so the client does not
+  # compete for the server's CPU; on a single-node cluster it simply co-locates.
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: llm-serving
+  {{- with .Values.tolerations }}
+  tolerations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

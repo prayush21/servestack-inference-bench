@@ -1,0 +1,28 @@
+# Benchmark definition shared by both backends. Changing anything here changes the experiment;
+# the full config and the prompts file hash are written into every run's meta.json.
+
+model_id: Qwen/Qwen2.5-1.5B-Instruct
+model_revision: 989aa7980e4cf806f80c7fef2b1adb7bc71aa306
+served_model_name: qwen2.5-1.5b-instruct   # vLLM --served-model-name (Triton ignores it)
+prompts_file: configs/prompts.jsonl        # pre-templated with the Qwen chat template
+
+sampling:
+  max_tokens: 256      # controlled output length...
+  ignore_eos: true     # ...enforced: every request generates exactly max_tokens tokens
+  temperature: 0.0     # greedy (vLLM temperature=0; Triton top_k=1)
+  top_p: 1.0
+  top_k: null
+  seed: 0
+
+# Closed-loop concurrency: C workers each keep one request in flight.
+concurrency: [1, 4, 16, 32, 64]   # 64 == engine.maxNumSeqs in the Helm values
+
+# Measured requests per level = max(min_requests_per_level, C * rounds_per_level).
+min_requests_per_level: 64
+rounds_per_level: 4
+# Warm-up requests per level = max(min_warmup_requests, C * warmup_rounds); excluded from metrics.
+warmup_rounds: 1
+min_warmup_requests: 4
+
+request_timeout_s: 300
+gpu_sample_interval_s: 1.0

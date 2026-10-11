@@ -1,0 +1,36 @@
+diff -ruN a/config.pbtxt b/config.pbtxt
+--- a/config.pbtxt	2026-10-07 20:14:01
++++ b/config.pbtxt	2026-10-07 20:14:01
+@@ -124,6 +124,19 @@
+     dims: [ 1 ]
+     optional: true
+   },
++  # llm-serving patch: forward EOS controls for fixed-length benchmarks
++  {
++    name: "sampling_param_ignore_eos"
++    data_type: TYPE_BOOL
++    dims: [ 1 ]
++    optional: true
++  },
++  {
++    name: "sampling_param_min_tokens"
++    data_type: TYPE_INT32
++    dims: [ 1 ]
++    optional: true
++  },
+   ## Arguments for Controlling Response Output Fields ##
+   {
+     name: "return_finish_reason"
+diff -ruN a/helpers.py b/helpers.py
+--- a/helpers.py	2026-10-07 20:14:01
++++ b/helpers.py	2026-10-07 20:14:01
+@@ -34,6 +34,9 @@
+         'seed',
+         'exclude_input_from_output',
+         'return_perf_metrics',
++        # llm-serving patch: forward EOS controls for fixed-length benchmarks
++        'ignore_eos',
++        'min_tokens',
+     ]
+     param_mappings = {}
+     for arg in sampling_params_args:

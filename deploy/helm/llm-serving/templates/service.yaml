@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "llm-serving.fullname" . }}
+  labels:
+    {{- include "llm-serving.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "llm-serving.selectorLabels" . | nindent 4 }}
+  ports:
+    - {name: http, port: {{ .Values.service.httpPort }}, targetPort: http, protocol: TCP}
+    {{- if eq .Values.backend "triton" }}
+    - {name: grpc, port: 8001, targetPort: grpc, protocol: TCP}
+    - {name: metrics, port: 8002, targetPort: metrics, protocol: TCP}
+    {{- end }}

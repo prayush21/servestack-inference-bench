@@ -1,0 +1,66 @@
+{{- if .Values.modelCache.create }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "llm-serving.cacheClaim" . }}
+  labels:
+    {{- include "llm-serving.labels" . | nindent 4 }}
+spec:
+  accessModes: [{{ .Values.modelCache.accessMode }}]
+  {{- if .Values.modelCache.storageClassName }}
+  storageClassName: {{ .Values.modelCache.storageClassName }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.modelCache.size }}
+{{- end }}
+{{- if .Values.modelDownload.enabled }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-model-download
+  labels:
+    {{- include "llm-serving.labels" . | nindent 4 }}
+spec:
+  backoffLimit: {{ .Values.modelDownload.backoffLimit }}
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: llm-serving-model-download
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      containers:
+        - name: download
+          image: {{ include "llm-serving.image" .Values.vllm.image }}
+          imagePullPolicy: {{ .Values.vllm.image.pullPolicy }}
+          command: ["python3", "-c"]
+          args:
+            - |
+              from huggingface_hub import snapshot_download
+              p = snapshot_download({{ .Values.model.id | quote }}, revision={{ .Values.model.revision | quote }})
+              print("downloaded to", p)
+          env:
+            {{- include "llm-serving.cacheEnv" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.modelDownload.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - {name: model-cache, mountPath: {{ .Values.modelCache.mountPath }}}
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: {{ include "llm-serving.cacheClaim" . }}
+      # Same placement as the backends: the PVC (often zonal) must land where the GPU pod runs.
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

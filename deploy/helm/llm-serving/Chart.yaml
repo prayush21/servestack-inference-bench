@@ -1,0 +1,9 @@
+apiVersion: v2
+name: llm-serving
+description: >-
+  Single-GPU LLM serving for a vLLM vs. Triton + TensorRT-LLM (LLM API) comparison.
+  One chart, one shared engine config, backend selected with `backend: vllm|triton`.
+type: application
+version: 0.1.0
+appVersion: "vllm-v0.30.0_triton-26.07-trtllm-1.2.1"
+kubeVersion: ">=1.29.0-0"
